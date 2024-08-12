@@ -14,3 +14,5 @@ ruff
 scikit-learn
 tiktoken
 transformers
+loguru
+click

@@ -1,11 +1,13 @@
 import os
+import sys
+import click
 import glob
 import traceback
 import asyncio
 import json
 import re
 import urllib.request
-import logging
+from loguru import logger
 from concurrent.futures import ThreadPoolExecutor
 import warnings
 from typing import List, Dict, Tuple, Optional
@@ -47,25 +49,26 @@ USE_VERBOSE = False
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 warnings.filterwarnings("ignore", category=FutureWarning)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# remove default logger
+logger.add(sys.stderr, level="INFO", format="{time} - {level} - {message}")
 
 # GPU Check
 def is_gpu_available():
     if not GPU_AVAILABLE:
-        logging.warning("GPU support not available: nvgpu module not found")
+        logger.warning("GPU support not available: nvgpu module not found")
         return {"gpu_found": False, "num_gpus": 0, "first_gpu_vram": 0, "total_vram": 0, "error": "nvgpu module not found"}
     try:
         gpu_info = nvgpu.gpu_info()
         num_gpus = len(gpu_info)
         if num_gpus == 0:
-            logging.warning("No GPUs found on the system")
+            logger.warning("No GPUs found on the system")
             return {"gpu_found": False, "num_gpus": 0, "first_gpu_vram": 0, "total_vram": 0}
         first_gpu_vram = gpu_info[0]['mem_total']
         total_vram = sum(gpu['mem_total'] for gpu in gpu_info)
-        logging.info(f"GPU(s) found: {num_gpus}, Total VRAM: {total_vram} MB")
+        logger.info(f"GPU(s) found: {num_gpus}, Total VRAM: {total_vram} MB")
         return {"gpu_found": True, "num_gpus": num_gpus, "first_gpu_vram": first_gpu_vram, "total_vram": total_vram, "gpu_info": gpu_info}
     except Exception as e:
-        logging.error(f"Error checking GPU availability: {e}")
+        logger.error(f"Error checking GPU availability: {e}")
         return {"gpu_found": False, "num_gpus": 0, "first_gpu_vram": 0, "total_vram": 0, "error": str(e)}
 
 # Model Download
@@ -85,25 +88,25 @@ async def download_models() -> Tuple[List[str], List[Dict[str, str]]]:
     try:
         with lock.acquire(timeout=1200):
             if not os.path.exists(filename):
-                logging.info(f"Downloading model {model_name} from {model_url}...")
+                logger.info(f"Downloading model {model_name} from {model_url}...")
                 urllib.request.urlretrieve(model_url, filename)
                 file_size = os.path.getsize(filename) / (1024 * 1024)
                 if file_size < 100:
                     os.remove(filename)
                     status["status"] = "failure"
                     status["message"] = f"Downloaded file is too small ({file_size:.2f} MB), probably not a valid model file."
-                    logging.error(f"Error: {status['message']}")
+                    logger.error(f"Error: {status['message']}")
                 else:
-                    logging.info(f"Successfully downloaded: {filename} (Size: {file_size:.2f} MB)")
+                    logger.info(f"Successfully downloaded: {filename} (Size: {file_size:.2f} MB)")
             else:
-                logging.info(f"Model file already exists: {filename}")
+                logger.info(f"Model file already exists: {filename}")
     except Timeout:
-        logging.error(f"Error: Could not acquire lock for downloading {model_name}")
+        logger.error(f"Error: Could not acquire lock for downloading {model_name}")
         status["status"] = "failure"
         status["message"] = "Could not acquire lock for downloading."
     
     download_status.append(status)
-    logging.info("Model download process completed.")
+    logger.info("Model download process completed.")
     return [model_name], download_status
 
 # Model Loading
@@ -115,22 +118,22 @@ def load_model(llm_model_name: str, raise_exception: bool = True):
         models_dir = os.path.join(base_dir, 'models')
         matching_files = glob.glob(os.path.join(models_dir, f"{llm_model_name}*"))
         if not matching_files:
-            logging.error(f"Error: No model file found matching: {llm_model_name}")
+            logger.error(f"Error: No model file found matching: {llm_model_name}")
             raise FileNotFoundError
         model_file_path = max(matching_files, key=os.path.getmtime)
-        logging.info(f"Loading model: {model_file_path}")
+        logger.info(f"Loading model: {model_file_path}")
         try:
-            logging.info("Attempting to load model with GPU acceleration...")
+            logger.info("Attempting to load model with GPU acceleration...")
             model_instance = Llama(
                 model_path=model_file_path,
                 n_ctx=LOCAL_LLM_CONTEXT_SIZE_IN_TOKENS,
                 verbose=USE_VERBOSE,
                 n_gpu_layers=-1
             )
-            logging.info("Model loaded successfully with GPU acceleration.")
+            logger.info("Model loaded successfully with GPU acceleration.")
         except Exception as gpu_e:
-            logging.warning(f"Failed to load model with GPU acceleration: {gpu_e}")
-            logging.info("Falling back to CPU...")
+            logger.warning(f"Failed to load model with GPU acceleration: {gpu_e}")
+            logger.info("Falling back to CPU...")
             try:
                 model_instance = Llama(
                     model_path=model_file_path,
@@ -138,15 +141,15 @@ def load_model(llm_model_name: str, raise_exception: bool = True):
                     verbose=USE_VERBOSE,
                     n_gpu_layers=0
                 )
-                logging.info("Model loaded successfully with CPU.")
+                logger.info("Model loaded successfully with CPU.")
             except Exception as cpu_e:
-                logging.error(f"Failed to load model with CPU: {cpu_e}")
+                logger.error(f"Failed to load model with CPU: {cpu_e}")
                 if raise_exception:
                     raise
                 return None
         return model_instance
     except Exception as e:
-        logging.error(f"Exception occurred while loading the model: {e}")
+        logger.error(f"Exception occurred while loading the model: {e}")
         traceback.print_exc()
         if raise_exception:
             raise
@@ -161,7 +164,7 @@ async def generate_completion(prompt: str, max_tokens: int = 5000) -> Optional[s
     elif API_PROVIDER == "OPENAI":
         return await generate_completion_from_openai(prompt, max_tokens)
     else:
-        logging.error(f"Invalid API_PROVIDER: {API_PROVIDER}")
+        logger.error(f"Invalid API_PROVIDER: {API_PROVIDER}")
         return None
 
 def get_tokenizer(model_name: str):
@@ -179,7 +182,7 @@ def estimate_tokens(text: str, model_name: str) -> int:
         tokenizer = get_tokenizer(model_name)
         return len(tokenizer.encode(text))
     except Exception as e:
-        logging.warning(f"Error using tokenizer for {model_name}: {e}. Falling back to approximation.")
+        logger.warning(f"Error using tokenizer for {model_name}: {e}. Falling back to approximation.")
         return approximate_tokens(text)
 
 def approximate_tokens(text: str) -> int:
@@ -265,13 +268,13 @@ def adjust_overlaps(chunks: List[str], tokenizer, max_chunk_tokens: int, overlap
 
 async def generate_completion_from_claude(prompt: str, max_tokens: int = CLAUDE_MAX_TOKENS - TOKEN_BUFFER) -> Optional[str]:
     if not ANTHROPIC_API_KEY:
-        logging.error("Anthropic API key not found. Please set the ANTHROPIC_API_KEY environment variable.")
+        logger.error("Anthropic API key not found. Please set the ANTHROPIC_API_KEY environment variable.")
         return None
     client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     prompt_tokens = estimate_tokens(prompt, CLAUDE_MODEL_STRING)
     adjusted_max_tokens = min(max_tokens, CLAUDE_MAX_TOKENS - prompt_tokens - TOKEN_BUFFER)
     if adjusted_max_tokens <= 0:
-        logging.warning("Prompt is too long for Claude API. Chunking the input.")
+        logger.warning("Prompt is too long for Claude API. Chunking the input.")
         chunks = chunk_text(prompt, CLAUDE_MAX_TOKENS - TOKEN_CUSHION, CLAUDE_MODEL_STRING)
         results = []
         for chunk in chunks:
@@ -284,9 +287,9 @@ async def generate_completion_from_claude(prompt: str, max_tokens: int = CLAUDE_
                 ) as stream:
                     message = await stream.get_final_message()
                     results.append(message.content[0].text)
-                    logging.info(f"Chunk processed. Input tokens: {message.usage.input_tokens:,}, Output tokens: {message.usage.output_tokens:,}")
+                    logger.info(f"Chunk processed. Input tokens: {message.usage.input_tokens:,}, Output tokens: {message.usage.output_tokens:,}")
             except Exception as e:
-                logging.error(f"An error occurred while processing a chunk: {e}")
+                logger.error(f"An error occurred while processing a chunk: {e}")
         return " ".join(results)
     else:
         try:
@@ -298,22 +301,22 @@ async def generate_completion_from_claude(prompt: str, max_tokens: int = CLAUDE_
             ) as stream:
                 message = await stream.get_final_message()
                 output_text = message.content[0].text
-                logging.info(f"Total input tokens: {message.usage.input_tokens:,}")
-                logging.info(f"Total output tokens: {message.usage.output_tokens:,}")
-                logging.info(f"Generated output (abbreviated): {output_text[:150]}...")
+                logger.info(f"Total input tokens: {message.usage.input_tokens:,}")
+                logger.info(f"Total output tokens: {message.usage.output_tokens:,}")
+                logger.info(f"Generated output (abbreviated): {output_text[:150]}...")
                 return output_text
         except Exception as e:
-            logging.error(f"An error occurred while requesting from Claude API: {e}")
+            logger.error(f"An error occurred while requesting from Claude API: {e}")
             return None
 
 async def generate_completion_from_openai(prompt: str, max_tokens: int = 5000) -> Optional[str]:
     if not OPENAI_API_KEY:
-        logging.error("OpenAI API key not found. Please set the OPENAI_API_KEY environment variable.")
+        logger.error("OpenAI API key not found. Please set the OPENAI_API_KEY environment variable.")
         return None
     prompt_tokens = estimate_tokens(prompt, OPENAI_COMPLETION_MODEL)
     adjusted_max_tokens = min(max_tokens, 4096 - prompt_tokens - TOKEN_BUFFER)  # 4096 is typical max for GPT-3.5 and GPT-4
     if adjusted_max_tokens <= 0:
-        logging.warning("Prompt is too long for OpenAI API. Chunking the input.")
+        logger.warning("Prompt is too long for OpenAI API. Chunking the input.")
         chunks = chunk_text(prompt, OPENAI_MAX_TOKENS - TOKEN_CUSHION, OPENAI_COMPLETION_MODEL) 
         results = []
         for chunk in chunks:
@@ -326,9 +329,9 @@ async def generate_completion_from_openai(prompt: str, max_tokens: int = 5000) -
                 )
                 result = response.choices[0].message.content
                 results.append(result)
-                logging.info(f"Chunk processed. Output tokens: {response.usage.completion_tokens:,}")
+                logger.info(f"Chunk processed. Output tokens: {response.usage.completion_tokens:,}")
             except Exception as e:
-                logging.error(f"An error occurred while processing a chunk: {e}")
+                logger.error(f"An error occurred while processing a chunk: {e}")
         return " ".join(results)
     else:
         try:
@@ -339,20 +342,20 @@ async def generate_completion_from_openai(prompt: str, max_tokens: int = 5000) -
                 temperature=0.7,
             )
             output_text = response.choices[0].message.content
-            logging.info(f"Total tokens: {response.usage.total_tokens:,}")
-            logging.info(f"Generated output (abbreviated): {output_text[:150]}...")
+            logger.info(f"Total tokens: {response.usage.total_tokens:,}")
+            logger.info(f"Generated output (abbreviated): {output_text[:150]}...")
             return output_text
         except Exception as e:
-            logging.error(f"An error occurred while requesting from OpenAI API: {e}")
+            logger.error(f"An error occurred while requesting from OpenAI API: {e}")
             return None
 
 async def generate_completion_from_local_llm(llm_model_name: str, input_prompt: str, number_of_tokens_to_generate: int = 100, temperature: float = 0.7, grammar_file_string: str = None):
-    logging.info(f"Starting text completion using model: '{llm_model_name}' for input prompt: '{input_prompt}'")
+    logger.info(f"Starting text completion using model: '{llm_model_name}' for input prompt: '{input_prompt}'")
     llm = load_model(llm_model_name)
     prompt_tokens = estimate_tokens(input_prompt, llm_model_name)
     adjusted_max_tokens = min(number_of_tokens_to_generate, LOCAL_LLM_CONTEXT_SIZE_IN_TOKENS - prompt_tokens - TOKEN_BUFFER)
     if adjusted_max_tokens <= 0:
-        logging.warning("Prompt is too long for LLM. Chunking the input.")
+        logger.warning("Prompt is too long for LLM. Chunking the input.")
         chunks = chunk_text(input_prompt, LOCAL_LLM_CONTEXT_SIZE_IN_TOKENS - TOKEN_CUSHION, llm_model_name)
         results = []
         for chunk in chunks:
@@ -363,9 +366,9 @@ async def generate_completion_from_local_llm(llm_model_name: str, input_prompt: 
                     temperature=temperature,
                 )
                 results.append(output['choices'][0]['text'])
-                logging.info(f"Chunk processed. Output tokens: {output['usage']['completion_tokens']:,}")
+                logger.info(f"Chunk processed. Output tokens: {output['usage']['completion_tokens']:,}")
             except Exception as e:
-                logging.error(f"An error occurred while processing a chunk: {e}")
+                logger.error(f"An error occurred while processing a chunk: {e}")
         return " ".join(results)
     else:
         grammar_file_string_lower = grammar_file_string.lower() if grammar_file_string else ""
@@ -373,10 +376,10 @@ async def generate_completion_from_local_llm(llm_model_name: str, input_prompt: 
             list_of_grammar_files = glob.glob("./grammar_files/*.gbnf")
             matching_grammar_files = [x for x in list_of_grammar_files if grammar_file_string_lower in os.path.splitext(os.path.basename(x).lower())[0]]
             if len(matching_grammar_files) == 0:
-                logging.error(f"No grammar file found matching: {grammar_file_string}")
+                logger.error(f"No grammar file found matching: {grammar_file_string}")
                 raise FileNotFoundError
             grammar_file_path = max(matching_grammar_files, key=os.path.getmtime)
-            logging.info(f"Loading selected grammar file: '{grammar_file_path}'")
+            logger.info(f"Loading selected grammar file: '{grammar_file_path}'")
             llama_grammar = LlamaGrammar.from_file(grammar_file_path)
             output = llm(
                 prompt=input_prompt,
@@ -395,7 +398,7 @@ async def generate_completion_from_local_llm(llm_model_name: str, input_prompt: 
             generated_text = generated_text.encode('unicode_escape').decode()
         finish_reason = str(output['choices'][0]['finish_reason'])
         llm_model_usage_json = json.dumps(output['usage'])
-        logging.info(f"Completed text completion in {output['usage']['total_time']:.2f} seconds. Beginning of generated text: \n'{generated_text[:150]}'...")
+        logger.info(f"Completed text completion in {output['usage']['total_time']:.2f} seconds. Beginning of generated text: \n'{generated_text[:150]}'...")
         return {
             "generated_text": generated_text,
             "finish_reason": finish_reason,
@@ -411,16 +414,16 @@ def preprocess_image(image):
     return Image.fromarray(gray)
 
 def convert_pdf_to_images(input_pdf_file_path: str, max_pages: int = 0, skip_first_n_pages: int = 0) -> List[Image.Image]:
-    logging.info(f"Processing PDF file {input_pdf_file_path}")
+    logger.info(f"Processing PDF file {input_pdf_file_path}")
     if max_pages == 0:
         last_page = None
-        logging.info("Converting all pages to images...")
+        logger.info("Converting all pages to images...")
     else:
         last_page = skip_first_n_pages + max_pages
-        logging.info(f"Converting pages {skip_first_n_pages + 1} to {last_page}")
+        logger.info(f"Converting pages {skip_first_n_pages + 1} to {last_page}")
     first_page = skip_first_n_pages + 1  # pdf2image uses 1-based indexing
     images = convert_from_path(input_pdf_file_path, first_page=first_page, last_page=last_page)
-    logging.info(f"Converted {len(images)} pages from PDF file to images.")
+    logger.info(f"Converted {len(images)} pages from PDF file to images.")
     return images
 
 def ocr_image(image):
@@ -428,7 +431,7 @@ def ocr_image(image):
     return pytesseract.image_to_string(preprocessed_image)
 
 async def process_chunk(chunk: str, prev_context: str, chunk_index: int, total_chunks: int, reformat_as_markdown: bool, suppress_headers_and_page_numbers: bool) -> Tuple[str, str]:
-    logging.info(f"Processing chunk {chunk_index + 1}/{total_chunks} (length: {len(chunk):,} characters)")
+    logger.info(f"Processing chunk {chunk_index + 1}/{total_chunks} (length: {len(chunk):,} characters)")
     
     # Step 1: OCR Correction
     ocr_correction_prompt = f"""Correct OCR-induced errors in the text, ensuring it flows coherently with the previous context. Follow these guidelines:
@@ -498,7 +501,7 @@ Reformatted markdown:
 """
         processed_chunk = await generate_completion(markdown_prompt, max_tokens=len(ocr_corrected_chunk) + 500)
     new_context = processed_chunk[-1000:]  # Use the last 1000 characters as context for the next chunk
-    logging.info(f"Chunk {chunk_index + 1}/{total_chunks} processed. Output length: {len(processed_chunk):,} characters")
+    logger.info(f"Chunk {chunk_index + 1}/{total_chunks} processed. Output length: {len(processed_chunk):,} characters")
     return processed_chunk, new_context
 
 async def process_chunks(chunks: List[str], reformat_as_markdown: bool, suppress_headers_and_page_numbers: bool) -> List[str]:
@@ -507,26 +510,26 @@ async def process_chunks(chunks: List[str], reformat_as_markdown: bool, suppress
         processed_chunk, new_context = await process_chunk(chunk, prev_context, index, total_chunks, reformat_as_markdown, suppress_headers_and_page_numbers)
         return index, processed_chunk, new_context
     if USE_LOCAL_LLM:
-        logging.info("Using local LLM. Processing chunks sequentially...")
+        logger.info("Using local LLM. Processing chunks sequentially...")
         context = ""
         processed_chunks = []
         for i, chunk in enumerate(chunks):
             processed_chunk, context = await process_chunk(chunk, context, i, total_chunks, reformat_as_markdown, suppress_headers_and_page_numbers)
             processed_chunks.append(processed_chunk)
     else:
-        logging.info("Using API-based LLM. Processing chunks concurrently while maintaining order...")
+        logger.info("Using API-based LLM. Processing chunks concurrently while maintaining order...")
         tasks = [process_chunk_with_context(chunk, "", i) for i, chunk in enumerate(chunks)]
         results = await asyncio.gather(*tasks)
         # Sort results by index to maintain order
         sorted_results = sorted(results, key=lambda x: x[0])
         processed_chunks = [chunk for _, chunk, _ in sorted_results]
-    logging.info(f"All {total_chunks} chunks processed successfully")
+    logger.info(f"All {total_chunks} chunks processed successfully")
     return processed_chunks
 
 async def process_document(list_of_extracted_text_strings: List[str], reformat_as_markdown: bool = True, suppress_headers_and_page_numbers: bool = True) -> str:
-    logging.info(f"Starting document processing. Total pages: {len(list_of_extracted_text_strings):,}")
+    logger.info(f"Starting document processing. Total pages: {len(list_of_extracted_text_strings):,}")
     full_text = "\n\n".join(list_of_extracted_text_strings)
-    logging.info(f"Size of full text before processing: {len(full_text):,} characters")
+    logger.info(f"Size of full text before processing: {len(full_text):,} characters")
     chunk_size, overlap = 8000, 10
     # Improved chunking logic
     paragraphs = re.split(r'\n\s*\n', full_text)
@@ -563,11 +566,11 @@ async def process_document(list_of_extracted_text_strings: List[str], reformat_a
     for i in range(1, len(chunks)):
         overlap_text = chunks[i-1].split()[-overlap:]
         chunks[i] = " ".join(overlap_text) + " " + chunks[i]
-    logging.info(f"Document split into {len(chunks):,} chunks. Chunk size: {chunk_size:,}, Overlap: {overlap:,}")
+    logger.info(f"Document split into {len(chunks):,} chunks. Chunk size: {chunk_size:,}, Overlap: {overlap:,}")
     processed_chunks = await process_chunks(chunks, reformat_as_markdown, suppress_headers_and_page_numbers)
     final_text = "".join(processed_chunks)
-    logging.info(f"Size of text after combining chunks: {len(final_text):,} characters")
-    logging.info(f"Document processing complete. Final text length: {len(final_text):,} characters")
+    logger.info(f"Size of text after combining chunks: {len(final_text):,} characters")
+    logger.info(f"Document processing complete. Final text length: {len(final_text):,} characters")
     return final_text
 
 def remove_corrected_text_header(text):
@@ -611,19 +614,20 @@ EXPLANATION: [Your explanation]
         score_line = next(line for line in lines if line.startswith('SCORE:'))
         score = int(score_line.split(':')[1].strip())
         explanation = '\n'.join(line for line in lines if line.startswith('EXPLANATION:')).replace('EXPLANATION:', '').strip()
-        logging.info(f"Quality assessment: Score {score}/100")
-        logging.info(f"Explanation: {explanation}")
+        logger.info(f"Quality assessment: Score {score}/100")
+        logger.info(f"Explanation: {explanation}")
         return score, explanation
     except Exception as e:
-        logging.error(f"Error parsing quality assessment response: {e}")
-        logging.error(f"Raw response: {response}")
+        logger.error(f"Error parsing quality assessment response: {e}")
+        logger.error(f"Raw response: {response}")
         return None, None
     
 async def main():
     try:
         # Suppress HTTP request logs
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        input_pdf_file_path = '160301289-Warren-Buffett-Katharine-Graham-Letter.pdf'
+        logger.disable("httpx")
+        #logger.getLogger("httpx").setLevel(logger.WARNING)
+        input_pdf_file_path = sys.argv[1]
         max_test_pages = 0
         skip_first_n_pages = 0
         reformat_as_markdown = True
@@ -632,11 +636,11 @@ async def main():
         # Download the model if using local LLM
         if USE_LOCAL_LLM:
             _, download_status = await download_models()
-            logging.info(f"Model download status: {download_status}")
-            logging.info(f"Using Local LLM with Model: {DEFAULT_LOCAL_MODEL_NAME}")
+            logger.info(f"Model download status: {download_status}")
+            logger.info(f"Using Local LLM with Model: {DEFAULT_LOCAL_MODEL_NAME}")
         else:
-            logging.info(f"Using API for completions: {API_PROVIDER}")
-            logging.info(f"Using OpenAI model for embeddings: {OPENAI_EMBEDDING_MODEL}")
+            logger.info(f"Using API for completions: {API_PROVIDER}")
+            logger.info(f"Using OpenAI model for embeddings: {OPENAI_EMBEDDING_MODEL}")
 
         base_name = os.path.splitext(input_pdf_file_path)[0]
         output_extension = '.md' if reformat_as_markdown else '.txt'
@@ -645,45 +649,55 @@ async def main():
         llm_corrected_output_file_path = base_name + '_llm_corrected' + output_extension
 
         list_of_scanned_images = convert_pdf_to_images(input_pdf_file_path, max_test_pages, skip_first_n_pages)
-        logging.info(f"Tesseract version: {pytesseract.get_tesseract_version()}")
-        logging.info("Extracting text from converted pages...")
+        logger.info(f"Tesseract version: {pytesseract.get_tesseract_version()}")
+        logger.info("Extracting text from converted pages...")
         with ThreadPoolExecutor() as executor:
             list_of_extracted_text_strings = list(executor.map(ocr_image, list_of_scanned_images))
-        logging.info("Done extracting text from converted pages.")
+        logger.info("Done extracting text from converted pages.")
         raw_ocr_output = "\n".join(list_of_extracted_text_strings)
         with open(raw_ocr_output_file_path, "w") as f:
             f.write(raw_ocr_output)
-        logging.info(f"Raw OCR output written to: {raw_ocr_output_file_path}")
+        logger.info(f"Raw OCR output written to: {raw_ocr_output_file_path}")
 
-        logging.info("Processing document...")
+        logger.info("Processing document...")
         final_text = await process_document(list_of_extracted_text_strings, reformat_as_markdown, suppress_headers_and_page_numbers)            
         cleaned_text = remove_corrected_text_header(final_text)
         
         # Save the LLM corrected output
         with open(llm_corrected_output_file_path, 'w') as f:
             f.write(cleaned_text)
-        logging.info(f"LLM Corrected text written to: {llm_corrected_output_file_path}") 
+        logger.info(f"LLM Corrected text written to: {llm_corrected_output_file_path}") 
 
         if final_text:
-            logging.info(f"First 500 characters of LLM corrected processed text:\n{final_text[:500]}...")
+            logger.info(f"First 500 characters of LLM corrected processed text:\n{final_text[:500]}...")
         else:
-            logging.warning("final_text is empty or not defined.")
+            logger.warning("final_text is empty or not defined.")
 
-        logging.info(f"Done processing {input_pdf_file_path}.")
-        logging.info("\nSee output files:")
-        logging.info(f" Raw OCR: {raw_ocr_output_file_path}")
-        logging.info(f" LLM Corrected: {llm_corrected_output_file_path}")
+        logger.info(f"Done processing {input_pdf_file_path}.")
+        logger.info("\nSee output files:")
+        logger.info(f" Raw OCR: {raw_ocr_output_file_path}")
+        logger.info(f" LLM Corrected: {llm_corrected_output_file_path}")
 
         # Perform a final quality check
         quality_score, explanation = await assess_output_quality(raw_ocr_output, final_text)
         if quality_score is not None:
-            logging.info(f"Final quality score: {quality_score}/100")
-            logging.info(f"Explanation: {explanation}")
+            logger.info(f"Final quality score: {quality_score}/100")
+            logger.info(f"Explanation: {explanation}")
         else:
-            logging.warning("Unable to determine final quality score.")
+            logger.warning("Unable to determine final quality score.")
     except Exception as e:
-        logging.error(f"An error occurred in the main function: {e}")
-        logging.error(traceback.format_exc())
+        logger.error(f"An error occurred in the main function: {e}")
+        logger.error(traceback.format_exc())
+    
+# @click.command()
+# @click.argument('input_pdf', type=click.Path(exists=True))
+# @click.option('--max-pages', default=0, help='Maximum number of pages to process (0 for all)')
+# @click.option('--skip-pages', default=0, help='Number of pages to skip from the beginning')
+# @click.option('--markdown', is_flag=True, help='Reformat output as markdown')
+# @click.option('--suppress-headers', is_flag=True, help='Suppress headers and page numbers in output')
+# def cli(input_pdf, max_pages, skip_pages, markdown, suppress_headers):
+#     asyncio.run(main(input_pdf, max_pages, skip_pages, markdown, suppress_headers))
         
 if __name__ == '__main__':
+    #cli()
     asyncio.run(main())
